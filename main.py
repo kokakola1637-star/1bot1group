@@ -3,7 +3,7 @@ import logging
 import sqlite3
 import random
 import os
-from urllib.parse import urljoin
+from urllib.parse import urljoin, quote
 from contextlib import closing
 
 import aiohttp
@@ -14,7 +14,6 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 from bs4 import BeautifulSoup
 
-# FastAPI imports for Webhook mode
 from fastapi import FastAPI, Request
 from fastapi.responses import Response
 
@@ -24,7 +23,7 @@ import config
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# --- DATABASE HANDLING ---
+# --- DATABASE ---
 DB_NAME = "bot_database.db"
 
 def get_db_connection():
@@ -70,15 +69,21 @@ def save_video(video_url, title, category):
 class Scraper:
     @staticmethod
     async def get_page(url, session):
+        # Simulating a real browser to avoid getting blocked immediately
         headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+            "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 14_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/14.0 Mobile/15E148 Safari/604.1",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.5",
+            "Referer": "https://www.google.com/"
         }
         try:
-            async with session.get(url, headers=headers, timeout=20) as response:
+            async with session.get(url, headers=headers, timeout=15) as response:
                 if response.status == 200:
                     return await response.text()
+                else:
+                    logger.warning(f"Status {response.status} for {url}")
         except Exception as e:
-            logger.warning(f"Failed to fetch {url}: {e}")
+            logger.error(f"Fetch error {url}: {e}")
         return None
 
     @staticmethod
@@ -90,18 +95,30 @@ class Scraper:
         soup = BeautifulSoup(html, 'html.parser')
         videos = []
 
-        # 1. Look for <video> tags
+        # STRATEGY 1: Look for standard <video> tags
         for vid in soup.find_all('video'):
             src = vid.get('src')
+            poster = vid.get('poster')
             if src:
-                videos.append({'url': urljoin(url, src), 'title': vid.get('title', 'Video')})
+                videos.append({'url': urljoin(url, src), 'title': 'Video Found'})
 
-        # 2. Look for <a> tags ending in .mp4
+        # STRATEGY 2: Look for links ending in .mp4
         for a in soup.find_all('a', href=True):
             href = a['href']
             if href.endswith('.mp4'):
                 videos.append({'url': urljoin(url, href), 'title': a.get_text(strip=True)[:50]})
 
+        # STRATEGY 3: Look for specific generic classes (Common in tube sites)
+        # This is a "best guess" scraper.
+        for link in soup.find_all('a', href=True):
+            href = link['href']
+            # If the link looks like a video page (long string)
+            if len(href) > 10 and not href.endswith('.html') and not href.endswith('.php'):
+                 # We will check if this looks like a direct video or a page
+                 # For this simple bot, we mostly trust direct .mp4 or video tags
+                 pass
+
+        logger.info(f"Scraped {url}: Found {len(videos)} potential videos.")
         return list({v['url']: v for v in videos}.values())
 
 # --- BOT STATES ---
@@ -114,7 +131,6 @@ class Form(StatesGroup):
 bot = Bot(token=config.BOT_TOKEN)
 dp = Dispatcher()
 
-# --- KEYBOARDS ---
 def get_category_keyboard():
     buttons = []
     for i in range(0, len(config.CATEGORIES), 2):
@@ -158,7 +174,7 @@ async def quantity_selected(callback: types.CallbackQuery, state: FSMContext):
     user_data = await state.get_data()
     category = user_data.get('selected_category')
     
-    await callback.message.edit_text(f"Scraping {qty} videos for <b>{category}</b>...\nPlease wait.")
+    await callback.message.edit_text(f"Starting...\n<b>{category}</b>\nTarget: {qty} videos.")
     await state.set_state(Form.scraping)
     
     asyncio.create_task(run_scraping_task(callback.message, category, qty))
@@ -168,15 +184,33 @@ async def run_scraping_task(message, category, target_qty):
     sent_count = 0
     processed_in_session = set()
     
+    # Update sources to be Search Queries based on category
+    # This dynamically creates search URLs for the sites provided
+    sources_to_try = []
+    
+    # Helper to build search URLs
+    for base in config.SOURCES:
+        # If the site looks like it supports search query
+        if "desixclip" in base:
+            sources_to_try.append(f"https://desixclip.me/?s={quote(category)}")
+        elif "kamababa" in base:
+            sources_to_try.append(f"https://www.kamababa.desi/?s={quote(category)}")
+        elif "tamilsexzone" in base:
+            sources_to_try.append(f"https://www.tamilsexzone.com/?s={quote(category)}")
+        else:
+            # Fallback to the homepage if we don't know the search structure
+            sources_to_try.append(base)
+
     async with aiohttp.ClientSession() as session:
-        sources = config.SOURCES.copy()
-        random.shuffle(sources)
+        random.shuffle(sources_to_try)
 
         while sent_count < target_qty:
-            if not sources:
+            if not sources_to_try:
                 break
             
-            current_url = sources.pop(0)
+            current_url = sources_to_try.pop(0)
+            logger.info(f"Scanning: {current_url}")
+            
             videos = await Scraper.extract_videos(current_url, category, session)
             
             for video in videos:
@@ -198,59 +232,44 @@ async def run_scraping_task(message, category, target_qty):
                         caption = f"<b>{category}</b>\n{v_title}"
                         await bot.send_video(config.TARGET_GROUP_ID, v_url, caption=caption)
                         sent_count += 1
+                        logger.info(f"Sent [{sent_count}/{target_qty}]: {v_url}")
                         await asyncio.sleep(0.1)
                     except Exception as e:
                         logger.error(f"Send error: {e}")
 
     await message.answer(f"Done.\nSent {sent_count} videos.")
 
-# --- FASTAPI APP (WEBHOOK MODE) ---
+# --- FASTAPI APP ---
 app = FastAPI()
 
 @app.get("/")
 async def health_check():
-    # This endpoint is required for Koyeb to check if the app is healthy
     return {"status": "ok"}
 
 @app.post("/")
 async def process_update(request: Request):
-    """
-    Receives updates from Telegram/Koyeb.
-    NO SECRET CHECK.
-    """
     data = await request.json()
     update = types.Update(**data)
     await dp.feed_update(bot, update)
     return Response(status_code=200)
 
-# --- MAIN ENTRY POINT ---
+# --- MAIN ---
 async def main():
     init_db()
-    
-    # Detect environment
     port = int(os.environ.get("PORT", 8000))
     is_webhook_env = os.environ.get("PORT") is not None
-    
-    # Get URL from Environment Variable
     base_url = os.environ.get("APP_URL")
 
     if is_webhook_env:
-        # WEBHOOK MODE (Koyeb)
         logger.info("Running in WEBHOOK mode")
         webhook_url = f"{base_url}/" if base_url else None
-        
         await bot.delete_webhook(drop_pending_updates=True)
-        
         if webhook_url:
             logger.info(f"Setting webhook to: {webhook_url}")
             await bot.set_webhook(url=webhook_url)
-        else:
-            logger.warning("APP_URL environment variable is missing. Webhook not set.")
-
         import uvicorn
         uvicorn.run(app, host="0.0.0.0", port=port)
     else:
-        # POLLING MODE (Local)
         logger.info("Running in POLLING mode")
         await bot.delete_webhook(drop_pending_updates=True)
         await dp.start_polling(bot)

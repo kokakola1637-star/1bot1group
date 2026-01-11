@@ -207,6 +207,11 @@ async def run_scraping_task(message, category, target_qty):
 # --- FASTAPI APP (WEBHOOK MODE) ---
 app = FastAPI()
 
+@app.get("/")
+async def health_check():
+    # This endpoint is required for Koyeb to check if the app is healthy
+    return {"status": "ok"}
+
 @app.post("/")
 async def process_update(request: Request):
     """

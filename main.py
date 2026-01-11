@@ -26,8 +26,8 @@ logger = logging.getLogger(__name__)
 # --- DATABASE ---
 DB_NAME = "bot_database.db"
 
-def init_db():
-    # Force create/open the database
+def ensure_db_exists():
+    """Connects to DB and ensures the table exists. Runs on every DB interaction to be 100% safe."""
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
     try:
@@ -42,14 +42,14 @@ def init_db():
         ''')
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_url ON sent_videos(video_url)')
         conn.commit()
-        logger.info("Database initialized successfully.")
     except Exception as e:
-        logger.error(f"DB Init Error: {e}")
+        logger.error(f"DB Ensure Error: {e}")
     finally:
         conn.close()
 
 def is_duplicate(video_url):
     try:
+        ensure_db_exists() # Safe check
         conn = sqlite3.connect(DB_NAME)
         cursor = conn.cursor()
         cursor.execute("SELECT 1 FROM sent_videos WHERE video_url = ? LIMIT 1", (video_url,))
@@ -62,6 +62,7 @@ def is_duplicate(video_url):
 
 def save_video(video_url, title, category):
     try:
+        ensure_db_exists() # Safe check
         conn = sqlite3.connect(DB_NAME)
         cursor = conn.cursor()
         cursor.execute(
@@ -72,7 +73,7 @@ def save_video(video_url, title, category):
         conn.close()
         return True
     except sqlite3.IntegrityError:
-        return False
+        return False # Duplicate is okay
     except Exception as e:
         logger.error(f"DB Write Error: {e}")
         return False
@@ -107,7 +108,6 @@ class Scraper:
         # Find links that look like video pages
         for a in soup.find_all('a', href=True):
             href = a['href']
-            # Heuristic: links containing video/post/numbers
             if len(href) > 20: 
                 img = a.find('img')
                 thumb_url = None
@@ -270,7 +270,7 @@ async def run_scraping_task(message, category, target_qty):
                         try:
                             chat_id = int(config.TARGET_GROUP_ID)
                             
-                            # CORRECTED HTML ANCHOR TAG
+                            # HTML ANCHOR TAG
                             clickable_link = f'<a href="{v_url}">{v_title}</a>'
                             caption = f"<b>{category}</b>\n{clickable_link}"
                             
@@ -315,8 +315,8 @@ async def process_update(request: Request):
 
 # --- MAIN ---
 async def main():
-    # Initialize DB immediately on startup
-    init_db()
+    # Ensure DB is ready at startup (though ensure_db_exists handles it too)
+    ensure_db_exists()
     
     port = int(os.environ.get("PORT", 8000))
     is_webhook_env = os.environ.get("PORT") is not None

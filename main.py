@@ -87,58 +87,76 @@ class Scraper:
 
     @staticmethod
     async def scrape_generic(url, category, session):
-        # Accepts 3 args now to match the loop
         html = await Scraper.get_page(url, session)
         if not html: return []
         soup = BeautifulSoup(html, 'html.parser')
-        videos = []
-        for v in soup.find_all('video'):
-            if v.get('src'): videos.append(urljoin(url, v.get('src')))
+        results = []
+        
+        # Strategy: Find links that look like video pages
         for a in soup.find_all('a', href=True):
-            if a['href'].endswith('.mp4'): videos.append(urljoin(url, a['href']))
-        return videos
+            href = a['href']
+            # Simple heuristic: links longer than 15 chars containing 'video' or 'post' or numbers
+            if len(href) > 20: 
+                # Try to find the thumbnail image inside this link's container
+                img = a.find('img')
+                thumb_url = None
+                if img:
+                    thumb_url = img.get('src') or img.get('data-src')
+                    # If relative URL, make absolute
+                    if thumb_url and not thumb_url.startswith('http'):
+                        thumb_url = urljoin(url, thumb_url)
+                
+                full_link = urljoin(url, href)
+                title = a.get_text(strip=True)[:50]
+                results.append({'url': full_link, 'thumb': thumb_url, 'title': title})
+        return results
 
     @staticmethod
     async def scrape_desixclip(url, category, session):
         html = await Scraper.get_page(url, session)
         if not html: return []
         soup = BeautifulSoup(html, 'html.parser')
-        videos = []
-        for item in soup.find_all('article'): 
+        results = []
+        # Desixclip specific structure
+        for item in soup.find_all('article'):
             a_tag = item.find('a', href=True)
             if a_tag:
-                page_url = urljoin(url, a_tag['href'])
-                page_html = await Scraper.get_page(page_url, session)
-                if page_html:
-                    page_soup = BeautifulSoup(page_html, 'html.parser')
-                    vid = page_soup.find('video')
-                    if vid and vid.get('src'):
-                        videos.append(urljoin(page_url, vid.get('src')))
-        return videos
+                img_tag = item.find('img')
+                thumb = img_tag.get('src') if img_tag else None
+                if thumb and not thumb.startswith('http'):
+                    thumb = urljoin(url, thumb)
+                
+                results.append({
+                    'url': urljoin(url, a_tag['href']),
+                    'thumb': thumb,
+                    'title': a_tag.get_text(strip=True)[:50]
+                })
+        return results
 
     @staticmethod
     async def scrape_kamababa(url, category, session):
         html = await Scraper.get_page(url, session)
         if not html: return []
         soup = BeautifulSoup(html, 'html.parser')
-        videos = []
+        results = []
+        # Look for standard video containers
         for a in soup.find_all('a', href=True):
             href = a['href']
-            # Heuristic to find video pages
-            if len(href) > 20 and 'video' in href.lower(): 
-                page_url = urljoin(url, href)
-                page_html = await Scraper.get_page(page_url, session)
-                if page_html:
-                    page_soup = BeautifulSoup(page_html, 'html.parser')
-                    for source in page_soup.find_all('source'):
-                        if source.get('src') and source.get('type') == 'video/mp4':
-                            videos.append(urljoin(page_url, source.get('src')))
-                    for vid in page_soup.find_all('video'):
-                        if vid.get('src'): videos.append(urljoin(page_url, vid.get('src')))
-        return videos
+            if '/video/' in href:
+                img = a.find('img')
+                thumb = img.get('src') if img else None
+                if thumb and not thumb.startswith('http'):
+                    thumb = urljoin(url, thumb)
+                results.append({
+                    'url': urljoin(url, href),
+                    'thumb': thumb,
+                    'title': a.get_text(strip=True)[:50]
+                })
+        return results
 
     @staticmethod
     async def scrape_eporner(url, category, session):
+        # Eporner is hard to scrape simply, using generic
         return await Scraper.scrape_generic(url, category, session)
 
 # --- BOT STATES ---
@@ -202,12 +220,9 @@ async def run_scraping_task(message, category, target_qty):
     sent_count = 0
     processed_in_session = set()
     
-    # Build Task List correctly
     tasks = []
-    
     for base in config.SOURCES:
         if "desixclip" in base:
-            # Check if it already has a query
             separator = "&" if "?" in base else "?"
             tasks.append((f"{base}{separator}s={quote(category)}", Scraper.scrape_desixclip))
         elif "kamababa" in base:
@@ -227,20 +242,31 @@ async def run_scraping_task(message, category, target_qty):
             logger.info(f"Scraping: {url}")
             
             try:
-                # Pass category and session
-                video_links = await scraper_func(url, category, session)
+                data_list = await scraper_func(url, category, session)
                 
-                for v_url in video_links:
+                for item in data_list:
                     if sent_count >= target_qty: break
+                    
+                    v_url = item['url']
                     
                     if v_url in processed_in_session: continue
                     processed_in_session.add(v_url)
                     
                     if is_duplicate(v_url): continue
                     
-                    if save_video(v_url, "Video", category):
+                    if save_video(v_url, item['title'], category):
                         try:
-                            await bot.send_video(config.TARGET_GROUP_ID, v_url, caption=f"<b>{category}</b>")
+                            # Format Link as [Title](URL) for clickable link
+                            clickable_link = f"[{item['title']}]({v_url})"
+                            caption = f"<b>{category}</b>\n{clickable_link}"
+                            
+                            # Send Photo if thumbnail exists
+                            if item['thumb']:
+                                await bot.send_photo(config.TARGET_GROUP_ID, item['thumb'], caption=caption, parse_mode="HTML")
+                            else:
+                                # Fallback to text message if no thumb
+                                await bot.send_message(config.TARGET_GROUP_ID, caption, parse_mode="HTML")
+                                
                             sent_count += 1
                             await asyncio.sleep(0.1)
                         except Exception as e:

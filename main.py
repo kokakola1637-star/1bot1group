@@ -91,11 +91,9 @@ class Scraper:
                 if response.status == 200:
                     return await response.text()
                 else:
-                    # Only log warning, not error (403 is expected on some sites)
                     if response.status != 403:
                         logger.warning(f"HTTP {response.status} on {url}")
         except Exception as e:
-            # Log error but don't stop execution
             logger.error(f"Error fetching {url}: {e}")
         return None
 
@@ -261,9 +259,7 @@ async def run_scraping_task(message, category, target_qty):
                     v_title = item.get('title', 'Video')
                     v_thumb = item.get('thumb')
                     
-                    # Basic validation
-                    if not v_url or len(v_url) < 10:
-                        continue
+                    if not v_url or len(v_url) < 10: continue
                         
                     if v_url in processed_in_session: continue
                     processed_in_session.add(v_url)
@@ -272,11 +268,10 @@ async def run_scraping_task(message, category, target_qty):
                     
                     if save_video(v_url, v_title, category):
                         try:
-                            # Ensure Chat ID is integer
                             chat_id = int(config.TARGET_GROUP_ID)
                             
-                            # Prepare Text
-                            clickable_link = f"[{v_title}]({v_url})"
+                            # CORRECTED HTML ANCHOR TAG
+                            clickable_link = f'<a href="{v_url}">{v_title}</a>'
                             caption = f"<b>{category}</b>\n{clickable_link}"
                             
                             # 1. Try Sending Photo

@@ -3,7 +3,6 @@ import logging
 import sqlite3
 import random
 import os
-import re
 from urllib.parse import urljoin, quote
 from contextlib import closing
 
@@ -95,7 +94,7 @@ class Scraper:
         # Strategy: Find links that look like video pages
         for a in soup.find_all('a', href=True):
             href = a['href']
-            # Simple heuristic: links longer than 15 chars containing 'video' or 'post' or numbers
+            # Heuristic: links containing video/post/numbers
             if len(href) > 20: 
                 # Try to find the thumbnail image inside this link's container
                 img = a.find('img')
@@ -117,7 +116,6 @@ class Scraper:
         if not html: return []
         soup = BeautifulSoup(html, 'html.parser')
         results = []
-        # Desixclip specific structure
         for item in soup.find_all('article'):
             a_tag = item.find('a', href=True)
             if a_tag:
@@ -139,7 +137,6 @@ class Scraper:
         if not html: return []
         soup = BeautifulSoup(html, 'html.parser')
         results = []
-        # Look for standard video containers
         for a in soup.find_all('a', href=True):
             href = a['href']
             if '/video/' in href:
@@ -156,7 +153,6 @@ class Scraper:
 
     @staticmethod
     async def scrape_eporner(url, category, session):
-        # Eporner is hard to scrape simply, using generic
         return await Scraper.scrape_generic(url, category, session)
 
 # --- BOT STATES ---
@@ -239,38 +235,59 @@ async def run_scraping_task(message, category, target_qty):
             if not tasks: break
             
             url, scraper_func = tasks.pop(0)
-            logger.info(f"Scraping: {url}")
+            logger.info(f"--- Scraping URL: {url} ---")
             
             try:
                 data_list = await scraper_func(url, category, session)
+                logger.info(f"Found {len(data_list)} items from {url}")
                 
                 for item in data_list:
                     if sent_count >= target_qty: break
                     
                     v_url = item['url']
+                    v_title = item.get('title', 'Video')
+                    v_thumb = item.get('thumb')
                     
+                    # Basic validation
+                    if not v_url or len(v_url) < 10:
+                        continue
+                        
                     if v_url in processed_in_session: continue
                     processed_in_session.add(v_url)
                     
                     if is_duplicate(v_url): continue
                     
-                    if save_video(v_url, item['title'], category):
+                    if save_video(v_url, v_title, category):
                         try:
-                            # Format Link as [Title](URL) for clickable link
-                            clickable_link = f"[{item['title']}]({v_url})"
+                            # Ensure Chat ID is integer
+                            chat_id = int(config.TARGET_GROUP_ID)
+                            
+                            # Prepare Text
+                            clickable_link = f"[{v_title}]({v_url})"
                             caption = f"<b>{category}</b>\n{clickable_link}"
                             
-                            # Send Photo if thumbnail exists
-                            if item['thumb']:
-                                await bot.send_photo(config.TARGET_GROUP_ID, item['thumb'], caption=caption, parse_mode="HTML")
-                            else:
-                                # Fallback to text message if no thumb
-                                await bot.send_message(config.TARGET_GROUP_ID, caption, parse_mode="HTML")
-                                
+                            # 1. Try Sending Photo
+                            photo_sent = False
+                            if v_thumb and v_thumb.startswith('http'):
+                                try:
+                                    logger.info(f"Attempting to send PHOTO for: {v_url}")
+                                    await bot.send_photo(chat_id, v_thumb, caption=caption, parse_mode="HTML")
+                                    photo_sent = True
+                                    logger.info(f"Photo sent successfully.")
+                                except Exception as photo_err:
+                                    logger.warning(f"Photo failed: {photo_err}. Falling back to text.")
+                            
+                            # 2. Fallback to Text Message
+                            if not photo_sent:
+                                logger.info(f"Sending TEXT only for: {v_url}")
+                                await bot.send_message(chat_id, caption, parse_mode="HTML")
+                            
                             sent_count += 1
-                            await asyncio.sleep(0.1)
+                            # Slight delay to avoid strict rate limits
+                            await asyncio.sleep(0.2)
+                            
                         except Exception as e:
-                            logger.error(f"Send error: {e}")
+                            logger.error(f"CRITICAL Send error for {v_url}: {e}")
             except Exception as e:
                 logger.error(f"Scrape error on {url}: {e}")
 

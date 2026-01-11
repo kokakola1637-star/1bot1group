@@ -26,14 +26,11 @@ logger = logging.getLogger(__name__)
 # --- DATABASE ---
 DB_NAME = "bot_database.db"
 
-def get_db_connection():
-    conn = sqlite3.connect(DB_NAME)
-    conn.row_factory = sqlite3.Row
-    return conn
-
 def init_db():
-    with closing(get_db_connection()) as conn:
-        cursor = conn.cursor()
+    # Force create/open the database
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    try:
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS sent_videos (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -45,25 +42,40 @@ def init_db():
         ''')
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_url ON sent_videos(video_url)')
         conn.commit()
+        logger.info("Database initialized successfully.")
+    except Exception as e:
+        logger.error(f"DB Init Error: {e}")
+    finally:
+        conn.close()
 
 def is_duplicate(video_url):
-    with closing(get_db_connection()) as conn:
+    try:
+        conn = sqlite3.connect(DB_NAME)
         cursor = conn.cursor()
         cursor.execute("SELECT 1 FROM sent_videos WHERE video_url = ? LIMIT 1", (video_url,))
-        return cursor.fetchone() is not None
+        result = cursor.fetchone()
+        conn.close()
+        return result is not None
+    except Exception as e:
+        logger.error(f"DB Read Error: {e}")
+        return False
 
 def save_video(video_url, title, category):
-    with closing(get_db_connection()) as conn:
+    try:
+        conn = sqlite3.connect(DB_NAME)
         cursor = conn.cursor()
-        try:
-            cursor.execute(
-                "INSERT INTO sent_videos (video_url, video_title, category) VALUES (?, ?, ?)",
-                (video_url, title, category)
-            )
-            conn.commit()
-            return True
-        except sqlite3.IntegrityError:
-            return False
+        cursor.execute(
+            "INSERT INTO sent_videos (video_url, video_title, category) VALUES (?, ?, ?)",
+            (video_url, title, category)
+        )
+        conn.commit()
+        conn.close()
+        return True
+    except sqlite3.IntegrityError:
+        return False
+    except Exception as e:
+        logger.error(f"DB Write Error: {e}")
+        return False
 
 # --- SCRAPERS ---
 
@@ -79,8 +91,11 @@ class Scraper:
                 if response.status == 200:
                     return await response.text()
                 else:
-                    logger.warning(f"HTTP {response.status} on {url}")
+                    # Only log warning, not error (403 is expected on some sites)
+                    if response.status != 403:
+                        logger.warning(f"HTTP {response.status} on {url}")
         except Exception as e:
+            # Log error but don't stop execution
             logger.error(f"Error fetching {url}: {e}")
         return None
 
@@ -91,17 +106,15 @@ class Scraper:
         soup = BeautifulSoup(html, 'html.parser')
         results = []
         
-        # Strategy: Find links that look like video pages
+        # Find links that look like video pages
         for a in soup.find_all('a', href=True):
             href = a['href']
             # Heuristic: links containing video/post/numbers
             if len(href) > 20: 
-                # Try to find the thumbnail image inside this link's container
                 img = a.find('img')
                 thumb_url = None
                 if img:
                     thumb_url = img.get('src') or img.get('data-src')
-                    # If relative URL, make absolute
                     if thumb_url and not thumb_url.startswith('http'):
                         thumb_url = urljoin(url, thumb_url)
                 
@@ -270,26 +283,24 @@ async def run_scraping_task(message, category, target_qty):
                             photo_sent = False
                             if v_thumb and v_thumb.startswith('http'):
                                 try:
-                                    logger.info(f"Attempting to send PHOTO for: {v_url}")
+                                    logger.info(f"Sending Photo: {v_thumb}")
                                     await bot.send_photo(chat_id, v_thumb, caption=caption, parse_mode="HTML")
                                     photo_sent = True
-                                    logger.info(f"Photo sent successfully.")
                                 except Exception as photo_err:
-                                    logger.warning(f"Photo failed: {photo_err}. Falling back to text.")
+                                    logger.warning(f"Photo failed: {photo_err}. Sending text instead.")
                             
                             # 2. Fallback to Text Message
                             if not photo_sent:
-                                logger.info(f"Sending TEXT only for: {v_url}")
+                                logger.info(f"Sending Text: {v_url}")
                                 await bot.send_message(chat_id, caption, parse_mode="HTML")
                             
                             sent_count += 1
-                            # Slight delay to avoid strict rate limits
                             await asyncio.sleep(0.2)
                             
                         except Exception as e:
-                            logger.error(f"CRITICAL Send error for {v_url}: {e}")
+                            logger.error(f"CRITICAL Send error: {e}")
             except Exception as e:
-                logger.error(f"Scrape error on {url}: {e}")
+                logger.error(f"Scrape loop error on {url}: {e}")
 
     await message.answer(f"Done.\nSent {sent_count} videos.")
 
@@ -309,7 +320,9 @@ async def process_update(request: Request):
 
 # --- MAIN ---
 async def main():
+    # Initialize DB immediately on startup
     init_db()
+    
     port = int(os.environ.get("PORT", 8000))
     is_webhook_env = os.environ.get("PORT") is not None
     base_url = os.environ.get("APP_URL")

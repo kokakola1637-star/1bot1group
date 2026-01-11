@@ -66,7 +66,7 @@ def save_video(video_url, title, category):
         except sqlite3.IntegrityError:
             return False
 
-# --- SPECIFIC SCRAPERS ---
+# --- SCRAPERS ---
 
 class Scraper:
     @staticmethod
@@ -86,76 +86,60 @@ class Scraper:
         return None
 
     @staticmethod
-    async def scrape_generic(url, session):
+    async def scrape_generic(url, category, session):
+        # Accepts 3 args now to match the loop
         html = await Scraper.get_page(url, session)
         if not html: return []
         soup = BeautifulSoup(html, 'html.parser')
         videos = []
-        # 1. Look for <video>
         for v in soup.find_all('video'):
             if v.get('src'): videos.append(urljoin(url, v.get('src')))
-        # 2. Look for <a href="...mp4">
         for a in soup.find_all('a', href=True):
             if a['href'].endswith('.mp4'): videos.append(urljoin(url, a['href']))
         return videos
 
     @staticmethod
-    async def scrape_desixclip(base_url, category, session):
-        # Searches and scrapes desixclip.me
-        search_url = f"{base_url}?s={quote(category)}"
-        html = await Scraper.get_page(search_url, session)
+    async def scrape_desixclip(url, category, session):
+        html = await Scraper.get_page(url, session)
         if not html: return []
         soup = BeautifulSoup(html, 'html.parser')
         videos = []
-        # Desixclip specific: Look for items with class 'video-post' or similar
         for item in soup.find_all('article'): 
             a_tag = item.find('a', href=True)
             if a_tag:
-                page_url = urljoin(base_url, a_tag['href'])
-                # Go to the page to find the real video link
+                page_url = urljoin(url, a_tag['href'])
                 page_html = await Scraper.get_page(page_url, session)
                 if page_html:
                     page_soup = BeautifulSoup(page_html, 'html.parser')
-                    # Look for source inside video tag
                     vid = page_soup.find('video')
                     if vid and vid.get('src'):
                         videos.append(urljoin(page_url, vid.get('src')))
         return videos
 
     @staticmethod
-    async def scrape_kamababa(base_url, category, session):
-        # Kamababa usually lists videos on homepage or category pages
-        html = await Scraper.get_page(base_url, session)
+    async def scrape_kamababa(url, category, session):
+        html = await Scraper.get_page(url, session)
         if not html: return []
         soup = BeautifulSoup(html, 'html.parser')
         videos = []
-        # Look for links inside specific divs
         for a in soup.find_all('a', href=True):
             href = a['href']
-            if '/video/' in href or len(href) > 20:
-                page_url = urljoin(base_url, href)
+            # Heuristic to find video pages
+            if len(href) > 20 and 'video' in href.lower(): 
+                page_url = urljoin(url, href)
                 page_html = await Scraper.get_page(page_url, session)
                 if page_html:
                     page_soup = BeautifulSoup(page_html, 'html.parser')
-                    # Find direct video links
                     for source in page_soup.find_all('source'):
                         if source.get('src') and source.get('type') == 'video/mp4':
                             videos.append(urljoin(page_url, source.get('src')))
-                    # Fallback to video tag
                     for vid in page_soup.find_all('video'):
                         if vid.get('src'): videos.append(urljoin(page_url, vid.get('src')))
         return videos
 
     @staticmethod
-    async def scrape_eporner(base_url, category, session):
-        # Eporner is harder. We just scrape generic MP4 links here.
-        # A full eporner scraper requires parsing their JSON API.
-        html = await Scraper.get_page(base_url, session)
-        if not html: return []
-        videos = []
-        # Try to find video IDs on homepage and construct links (Basic approach)
-        # This is a simplified scraper for Eporner due to complexity
-        return await Scraper.scrape_generic(base_url, session)
+    async def scrape_eporner(url, category, session):
+        return await Scraper.scrape_generic(url, category, session)
 
 # --- BOT STATES ---
 class Form(StatesGroup):
@@ -218,19 +202,19 @@ async def run_scraping_task(message, category, target_qty):
     sent_count = 0
     processed_in_session = set()
     
-    # Build a task list: (URL, Scraper_Function)
+    # Build Task List correctly
     tasks = []
     
     for base in config.SOURCES:
         if "desixclip" in base:
-            tasks.append((f"{base}?s={quote(category)}", Scraper.scrape_desixclip))
+            # Check if it already has a query
+            separator = "&" if "?" in base else "?"
+            tasks.append((f"{base}{separator}s={quote(category)}", Scraper.scrape_desixclip))
         elif "kamababa" in base:
-            # Kamababa often blocks searches, scrape homepage or tag
             tasks.append((base, Scraper.scrape_kamababa))
         elif "eporner" in base:
             tasks.append((base, Scraper.scrape_eporner))
         else:
-            # Generic fallback
             tasks.append((base, Scraper.scrape_generic))
             
     random.shuffle(tasks)
@@ -243,6 +227,7 @@ async def run_scraping_task(message, category, target_qty):
             logger.info(f"Scraping: {url}")
             
             try:
+                # Pass category and session
                 video_links = await scraper_func(url, category, session)
                 
                 for v_url in video_links:
